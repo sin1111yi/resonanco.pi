@@ -358,11 +358,9 @@ export class ResonancoEngine {
       contextSummary,
       ``,
       `--- Decision Requirements ---`,
-      `First, assess task complexity:`,
-      `- SIMPLE: Can be answered directly from what you know. Output:`,
-      `  ACTION: complete`,
-      `  REASON: <your answer>`,
-      `- COMPLEX: Requires reading files, running code, or multiple perspectives. Output ACTION: assign to delegate.`,
+      `You are the Manager — you analyze and delegate, you do NOT execute.`,
+      `You have read tools (read, grep, find, ls) to help you understand the request and the codebase before deciding which sub-agent to use.`,
+      `But you must ALWAYS delegate actual work to sub-agents — reading is for your analysis only.`,
       ``,
       `If all work is complete:`,
       `  ACTION: complete`,
@@ -524,7 +522,7 @@ export class ResonancoEngine {
     const mgr = agents.find((a) => a.name === "manager");
     const managerAgent = mgr ?? {
       name: "manager", systemPrompt: this.getManagerSystemPrompt(),
-      tools: [], source: "user",
+      tools: ["read", "grep", "find", "ls"], source: "user",
     };
 
     return runSingleAgent(
@@ -643,9 +641,11 @@ export class ResonancoEngine {
       "You have NO tools to do any work yourself. You can ONLY delegate tasks to sub-agents.",
       "",
       "Your responsibilities:",
-      "1. Analyze the user's request — is it simple (answer directly) or complex (needs sub-agents)?",
-      "2. For simple requests (e.g. 'list files', 'what is X'), output ACTION: complete with the answer immediately to save time",
-      "3. For complex requests that need reading files, running code, or multiple perspectives, use ACTION: assign to delegate",
+      "1. Analyze the user's request — understand what's needed before deciding",
+      "2. You have read tools (read, grep, find, ls) to help you understand the codebase and make better delegation decisions",
+      "3. Use these read tools to gather context, then delegate actual work to sub-agents via ACTION: assign",
+      "4. You are NOT the executor — you are the decision-maker. Read tools are for your analysis only, not for doing the user's task.",
+      "5. NEVER output answers or results directly. Always delegate to sub-agents who have the proper tools (write, edit, bash).",
       "4. The sub-agents (coder, reviewer, architect, etc.) have all the tools they need",
       "5. Consider the user's needs and any mid-stream feedback",
       "6. Reference all historical agent outputs (weighted)",
