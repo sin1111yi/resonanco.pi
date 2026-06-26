@@ -1,12 +1,13 @@
 {
   "name": "resonanco.pi",
-  "version": "0.1.0",
-  "description": "Systematic subagent orchestration framework for pi - manage and coordinate multiple specialized agents",
+  "version": "0.2.0",
+  "description": "Multi-agent orchestration framework for pi - Manager delegates tasks to specialized sub-agents",
   "keywords": [
     "pi-package",
     "pi-extension",
     "subagent",
     "orchestration",
+    "multi-agent",
     "workflow"
   ],
   "license": "MIT",
@@ -30,6 +31,8 @@
     "agents/",
     "prompts/",
     "skills/",
-    "README.md"
+    "docs/",
+    "README.md",
+    "LICENSE"
   ]
 }
