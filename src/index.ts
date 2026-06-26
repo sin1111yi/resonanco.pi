@@ -9,6 +9,9 @@ import { Type } from "typebox";
 import { ResonancoEngine } from "./core/engine.ts";
 import { discoverAgents } from "./agents/registry.ts";
 import { ROLE_DISPLAY_NAMES, DISPATCH_MODE_LABELS, PERMISSION_LABELS } from "./types/index.ts";
+import { join } from "node:path";
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
 
 export default function (pi: ExtensionAPI) {
   const engine = new ResonancoEngine();
@@ -16,20 +19,64 @@ export default function (pi: ExtensionAPI) {
 
   // ── ANSI color helpers ────────────────────────────────────────
   const C = (code: number, s: string) => `\x1b[${code}m${s}\x1b[0m`;
-  const AGENT_COLOR: Record<string, number> = {
-    coder: 36, reviewer: 33, architect: 35,
-    tester: 92, documenter: 37, devops: 31, researcher: 94,
+
+  // Built-in agent definitions
+  const BUILTIN_AGENTS: Record<string, { icon: string; color: number }> = {
+    coder: { icon: "\u25C8", color: 36 },
+    reviewer: { icon: "\u25C8", color: 33 },
+    architect: { icon: "\u25C8", color: 35 },
+    tester: { icon: "\u25C8", color: 92 },
+    documenter: { icon: "\u25C8", color: 37 },
+    devops: { icon: "\u25C8", color: 31 },
+    researcher: { icon: "\u25C8", color: 94 },
   };
+  const BUILTIN_ORDER = ["coder","reviewer","architect","tester","documenter","devops","researcher"];
+  const CUSTOM_COLORS = [91, 93, 96, 95, 100, 101, 102, 103, 104, 105, 106, 107];
+
+  // Custom agents registry: persisted in agent config
+  const CUSTOM_AGENTS_FILE = join(homedir(), ".pi", "resonanco-agents.json");
+  const customAgents: Map<string, { icon: string; color: number }> = new Map();
+
+  function loadCustomAgents() {
+    try {
+      if (existsSync(CUSTOM_AGENTS_FILE)) {
+        const data = JSON.parse(readFileSync(CUSTOM_AGENTS_FILE, "utf-8"));
+        if (typeof data === "object" && data !== null) {
+          for (const [name, cfg] of Object.entries(data)) {
+            const c = cfg as any;
+            customAgents.set(name, { icon: c.icon ?? "\u25C6", color: c.color ?? 37 });
+          }
+        }
+      }
+    } catch {}
+    engine.setCustomAgents([...customAgents.keys()]);
+  }
+
+  function saveCustomAgents() {
+    try {
+      const data: Record<string, any> = {};
+      for (const [name, cfg] of customAgents) {
+        data[name] = cfg;
+      }
+      writeFileSync(CUSTOM_AGENTS_FILE, JSON.stringify(data, null, 2));
+    } catch {}
+  }
+
+  function getAllAgents(): string[] {
+    return [...BUILTIN_ORDER, ...customAgents.keys()];
+  }
+  function getAgentIcon(name: string): string {
+    return BUILTIN_AGENTS[name]?.icon ?? customAgents.get(name)?.icon ?? "\u25C6";
+  }
+  function getAgentColor(name: string): number {
+    return BUILTIN_AGENTS[name]?.color ?? customAgents.get(name)?.color ?? 37;
+  }
+
   // Braille spinner (npm-style)
   const BRAILLE = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
   const BRAILLE_IDLE = "⣶"; // top 6 dots
   const PERM_SHORT: Record<number, string> = {1:"Observer",2:"Cautious",3:"Semi-auto",4:"Full-auto"};
   const MODE_LABEL: Record<string, string> = {"one-to-one":"OneToOne","chain":"Chain","full-graph":"FullGraph"};
-  const AGENT_ORDER = ["coder","reviewer","architect","tester","documenter","devops","researcher"];
-  const AGENT_ICON: Record<string, string> = {
-    coder: "\uea70", reviewer: "\uf002", architect: "\ue5f4",
-    tester: "\uea41", documenter: "\uea9f", devops: "\uf6ff", researcher: "\ue95c",
-  };
 
   let _frame = 0;
 
@@ -38,10 +85,10 @@ export default function (pi: ExtensionAPI) {
     _timerCtx = ctx;
     const status = engine.getStatus();
 
-    const dotLine = AGENT_ORDER.map((role) => {
+    const dotLine = getAllAgents().map((role) => {
       const working = status.running && status.activeAgents.includes(role);
       const ch = working ? BRAILLE[_frame] : BRAILLE_IDLE;
-      const color = working ? AGENT_COLOR[role] : 90;
+      const color = working ? getAgentColor(role) : 90;
       return C(color, ch);
     }).join(" ");
 
@@ -54,8 +101,8 @@ export default function (pi: ExtensionAPI) {
       }
     }
     if (status.currentAgent) {
-      const icon = AGENT_ICON[status.currentAgent] ?? "";
-      const color = AGENT_COLOR[status.currentAgent] ?? 37;
+      const icon = getAgentIcon(status.currentAgent);
+      const color = getAgentColor(status.currentAgent);
       parts.push(`${C(color, icon)} ${status.currentAgent}`);
     } else {
       parts.push(`\u{1F4A4} ${PERM_SHORT[status.permissionLevel]}`);
@@ -417,6 +464,71 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("resonanco:register-agent", {
+    description: "Register a custom sub-agent: /resonanco:register-agent <name> <description>",
+    handler: async (_args: string, ctx: any) => {
+      const parts = _args.trim().split(/\s+/);
+      const name = parts[0];
+      const desc = parts.slice(1).join(" ");
+      if (!name || !desc) {
+        ctx.ui.notify("Usage: /resonanco:register-agent <name> <description>", "error");
+        return;
+      }
+      if (BUILTIN_ORDER.includes(name) || customAgents.has(name)) {
+        ctx.ui.notify(`Agent '${name}' already exists`, "error");
+        return;
+      }
+      const agentDir = join(homedir(), ".pi", "agent", "agents");
+      const agentFile = join(agentDir, `${name}.md`);
+      const templatePath = join(homedir(), ".pi", "agent", "extensions", "resonanco", "docs", "agent-template.md");
+      let md = "";
+      try {
+        md = readFileSync(templatePath, "utf-8")
+          .replace(/\{\{name\}\}/g, name)
+          .replace(/\{\{description\}\}/g, desc);
+      } catch {
+        // fallback if template missing
+        md = `---\nname: ${name}\ndescription: ${desc}\nrole: ${name}\ntools: read, write, edit, bash, grep, find, ls\n---\n\nYou are a ${name}. ${desc}\n\n## Core Responsibilities\n- ${desc}\n\n## Working Style\n- Read relevant context before acting\n- Make focused changes\n- Report results when done\n`;
+      }
+      try {
+        writeFileSync(agentFile, md);
+      } catch {
+        ctx.ui.notify("Failed to create agent file", "error");
+        return;
+      }
+      const colorIdx = customAgents.size % CUSTOM_COLORS.length;
+      customAgents.set(name, { icon: "\u25C6", color: CUSTOM_COLORS[colorIdx] });
+      engine.setCustomAgents([...customAgents.keys()]);
+      saveCustomAgents();
+      updateWidget(ctx);
+      ctx.ui.notify(`Registered custom agent: ${name}`, "info");
+      // Ask the main agent to refine the agent definition
+      pi.sendUserMessage([
+        { type: "text", text: `The custom agent "${name}" was just registered with description: "${desc}". Please use resonanco to delegate to documenter to refine its definition in ${agentFile} — improve the system prompt and add proper responsibilities and working style.` },
+      ]);
+    },
+  });
+
+  pi.registerCommand("resonanco:unregister-agent", {
+    description: "Remove a custom sub-agent: /resonanco:unregister-agent <name>",
+    handler: async (_args: string, ctx: any) => {
+      const name = _args.trim();
+      if (!name || !customAgents.has(name)) {
+        ctx.ui.notify(`Custom agent '${name}' not found`, "error");
+        return;
+      }
+      customAgents.delete(name);
+      // Remove agent file if it exists
+      const agentDir = join(homedir(), ".pi", "agent", "agents");
+      const agentFile = join(agentDir, `${name}.md`);
+      try { unlinkSync(agentFile); } catch {}
+      engine.setCustomAgents([...customAgents.keys()]);
+      saveCustomAgents();
+      updateWidget(ctx);
+      ctx.ui.notify(`Unregistered custom agent: ${name}`, "info");
+    },
+  });
+
   // ── Lifecycle Events ──────────────────────────────────────────
 
   let _timerCtx: any = null;
@@ -481,6 +593,7 @@ export default function (pi: ExtensionAPI) {
         "- documenter: documentation",
         "- devops: infrastructure/deployment",
         "- researcher: research and analysis",
+        ...Array.from(customAgents.keys()).map((n) => `- ${n}: custom agent`),
       ].join("\n");
     }
 
@@ -488,4 +601,7 @@ export default function (pi: ExtensionAPI) {
       systemPrompt: (event.systemPrompt ?? "") + "\n\n" + extra,
     };
   });
+
+  // Load persisted custom agents at startup
+  loadCustomAgents();
 }

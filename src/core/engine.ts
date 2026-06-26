@@ -65,6 +65,11 @@ export class ResonancoEngine {
   private _lastOutputs: Record<string, string> = {};
   private _onAgentOutput: ((agent: string, output: string) => void) | null = null;
   private _activeAgents: Set<string> = new Set();
+  private _customAgentNames: string[] = [];
+
+  setCustomAgents(names: string[]) {
+    this._customAgentNames = names;
+  }
 
   constructor(options?: EngineOptions) {
     this.config = { ...DEFAULT_CONFIG, ...options?.config };
@@ -353,8 +358,11 @@ export class ResonancoEngine {
       contextSummary,
       ``,
       `--- Decision Requirements ---`,
-      `You MUST output a decision in one of the formats below. Do NOT just acknowledge or describe the plan — output the exact format so the engine can execute it.`,
-      `Even if the user provides a specific plan, translate it into ACTION format below.`,
+      `First, assess task complexity:`,
+      `- SIMPLE: Can be answered directly from what you know. Output:`,
+      `  ACTION: complete`,
+      `  REASON: <your answer>`,
+      `- COMPLEX: Requires reading files, running code, or multiple perspectives. Output ACTION: assign to delegate.`,
       ``,
       `If all work is complete:`,
       `  ACTION: complete`,
@@ -379,7 +387,7 @@ export class ResonancoEngine {
       `  CONTEXT: <key context to pass>`,
       `  REASON: <why this mode and agents>`,
       ``,
-      `Available sub-agents: coder, reviewer, architect, tester, documenter, devops, researcher`,
+      `Available sub-agents: coder, reviewer, architect, tester, documenter, devops, researcher${this._customAgentNames.length > 0 ? ", " + this._customAgentNames.join(", ") : ""}`,
     ].join("\n");
   }
 
@@ -447,8 +455,8 @@ export class ResonancoEngine {
       if (m) {
         const agentName = m[1].toLowerCase() as AgentRole;
         const task = m[2].trim();
-        if (SUB_AGENT_ROLES.includes(agentName) && task) {
-          steps.push({ agent: agentName, task });
+        if (SUB_AGENT_ROLES.includes(agentName) || this._customAgentNames.includes(agentName)) {
+          steps.push({ agent: agentName as any, task });
         }
       }
     }
@@ -459,8 +467,8 @@ export class ResonancoEngine {
         const m = line.match(/^[\d\-\.\*\)]+\s*\.?\s*([a-zA-Z]+)\s*[:]\s*(.+)$/);
         if (m) {
           const agentName = m[1].toLowerCase() as AgentRole;
-          if (SUB_AGENT_ROLES.includes(agentName) && m[2].trim()) {
-            steps.push({ agent: agentName, task: m[2].trim() });
+          if (SUB_AGENT_ROLES.includes(agentName) || this._customAgentNames.includes(agentName)) {
+            steps.push({ agent: agentName as any, task: m[2].trim() });
           }
         }
       }
@@ -635,9 +643,9 @@ export class ResonancoEngine {
       "You have NO tools to do any work yourself. You can ONLY delegate tasks to sub-agents.",
       "",
       "Your responsibilities:",
-      "1. Analyze the user's request and decide which sub-agents to delegate to",
-      "2. For every single task, you MUST use ACTION=assign to delegate to sub-agents",
-      "3. NEVER try to do the work yourself — you have no tools to read files, write code, or run commands",
+      "1. Analyze the user's request — is it simple (answer directly) or complex (needs sub-agents)?",
+      "2. For simple requests (e.g. 'list files', 'what is X'), output ACTION: complete with the answer immediately to save time",
+      "3. For complex requests that need reading files, running code, or multiple perspectives, use ACTION: assign to delegate",
       "4. The sub-agents (coder, reviewer, architect, etc.) have all the tools they need",
       "5. Consider the user's needs and any mid-stream feedback",
       "6. Reference all historical agent outputs (weighted)",
@@ -665,6 +673,7 @@ export class ResonancoEngine {
       "- Documenter: documentation",
       "- DevOps: infrastructure",
       "- Researcher: investigation",
+      ...this._customAgentNames.map((n) => `- ${n}: custom agent`),
       "",
       "Note: Only you can talk to the user. Follow the output format strictly.",
     ].join("\n");
