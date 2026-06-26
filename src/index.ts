@@ -1,0 +1,491 @@
+/**
+ * Resonanco — Multi-Agent Orchestration Framework
+ *
+ * Manager + 7 sub-agents, three dispatch modes, four permission levels.
+ */
+
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { ResonancoEngine } from "./core/engine.ts";
+import { discoverAgents } from "./agents/registry.ts";
+import { ROLE_DISPLAY_NAMES, DISPATCH_MODE_LABELS, PERMISSION_LABELS } from "./types/index.ts";
+
+export default function (pi: ExtensionAPI) {
+  const engine = new ResonancoEngine();
+  const WIDGET_ID = "resonanco";
+
+  // ── ANSI color helpers ────────────────────────────────────────
+  const C = (code: number, s: string) => `\x1b[${code}m${s}\x1b[0m`;
+  const AGENT_COLOR: Record<string, number> = {
+    coder: 36, reviewer: 33, architect: 35,
+    tester: 92, documenter: 37, devops: 31, researcher: 94,
+  };
+  // Braille spinner (npm-style)
+  const BRAILLE = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+  const BRAILLE_IDLE = "⣶"; // top 6 dots
+  const PERM_SHORT: Record<number, string> = {1:"Observer",2:"Cautious",3:"Semi-auto",4:"Full-auto"};
+  const MODE_LABEL: Record<string, string> = {"one-to-one":"OneToOne","chain":"Chain","full-graph":"FullGraph"};
+  const AGENT_ORDER = ["coder","reviewer","architect","tester","documenter","devops","researcher"];
+  const AGENT_ICON: Record<string, string> = {
+    coder: "\uea70", reviewer: "\uf002", architect: "\ue5f4",
+    tester: "\uea41", documenter: "\uea9f", devops: "\uf6ff", researcher: "\ue95c",
+  };
+
+  let _frame = 0;
+
+  function updateWidget(ctx?: any) {
+    if (!ctx || !ctx.ui || ctx.mode !== "tui") return;
+    _timerCtx = ctx;
+    const status = engine.getStatus();
+
+    const dotLine = AGENT_ORDER.map((role) => {
+      const working = status.running && status.activeAgents.includes(role);
+      const ch = working ? BRAILLE[_frame] : BRAILLE_IDLE;
+      const color = working ? AGENT_COLOR[role] : 90;
+      return C(color, ch);
+    }).join(" ");
+
+    const modeLabel = workMode === "plan" ? C(33, "PLAN") : C(36, "BUILD");
+    const parts: string[] = [`${modeLabel} \u2022 ${dotLine}`];
+    if (status.stepCount > 0) {
+      parts.push(`\uf0ae ${status.stepCount}`);
+      if (status.dispatchMode) {
+        parts.push(MODE_LABEL[status.dispatchMode]);
+      }
+    }
+    if (status.currentAgent) {
+      const icon = AGENT_ICON[status.currentAgent] ?? "";
+      const color = AGENT_COLOR[status.currentAgent] ?? 37;
+      parts.push(`${C(color, icon)} ${status.currentAgent}`);
+    } else {
+      parts.push(`\u{1F4A4} ${PERM_SHORT[status.permissionLevel]}`);
+    }
+    if (status.running && status.contextStats.total > 0) {
+      parts.push(`\uf249 ctx:${status.contextStats.total}`);
+    }
+    if (autoManager) parts.push("[auto]");
+
+    const lines: string[] = [parts.join(" \u2022 ")];
+    ctx.ui.setWidget(WIDGET_ID, lines);
+  }
+
+  // ── Work Mode: plan | build ──────────────────────────────────
+  type WorkMode = "plan" | "build";
+  let workMode: WorkMode = "build";
+  const PLAN_TOOLS = new Set(["read", "grep", "find", "ls", "write"]);
+
+  function setWorkMode(mode: WorkMode, ctx?: any) {
+    workMode = mode;
+    if (ctx?.ui) {
+      ctx.ui.notify(mode === "plan" ? "Plan mode: read-only, design docs only" : "Build mode: full access", "info");
+    }
+    updateWidget(ctx);
+  }
+
+  // ── Auto Manager Mode ─────────────────────────────────────────
+  let autoManager = false;
+  function toggleAutoManager(ctx?: any) {
+    autoManager = !autoManager;
+    if (ctx?.ui) {
+      ctx.ui.notify(
+        autoManager ? "Auto Manager: ON (main dialog delegates to sub-agents)" : "Auto Manager: OFF",
+        "info",
+      );
+    }
+  }
+
+  // ── Keyboard Shortcuts ────────────────────────────────────────
+
+  pi.registerShortcut("ctrl+shift+r", {
+    description: "Resonanco: cycle permission Lv1->Lv4",
+    handler: async (ctx) => {
+      const current = engine.permission.getGlobalLevel();
+      const next = ((current % 4) + 1) as 1 | 2 | 3 | 4;
+      engine.permission.setGlobalLevel(next);
+      pi.sendMessage({
+        customType: "resonanco",
+        content: `Permission set to ${PERMISSION_LABELS[next]}`,
+        display: true,
+      });
+      updateWidget(ctx);
+    },
+  });
+
+  pi.registerShortcut("ctrl+shift+m", {
+    description: "Resonanco: toggle auto Manager mode",
+    handler: async (ctx) => {
+      toggleAutoManager(ctx);
+      updateWidget(ctx);
+    },
+  });
+
+  pi.registerShortcut("ctrl+q", {
+    description: "Resonanco: toggle plan/build mode",
+    handler: async (ctx) => {
+      setWorkMode(workMode === "plan" ? "build" : "plan", ctx);
+      updateWidget(ctx);
+    },
+  });
+
+  // ── Tool Schema ───────────────────────────────────────────────
+
+  const ResonancoParams = Type.Object({
+    prompt: Type.String({ description: "User request description" }),
+    permissionLevel: Type.Optional(
+      Type.Union(
+        [Type.Literal(1), Type.Literal(2), Type.Literal(3), Type.Literal(4)],
+        { description: "Permission level: 1=observer, 2=cautious, 3=semi-auto, 4=full-auto" },
+      ),
+    ),
+  });
+
+  // ── Main Tool: resonanco ──────────────────────────────────────
+
+  pi.registerTool({
+    name: "resonanco",
+    label: "Resonanco",
+    description: [
+      "Multi-agent orchestration system. Manager analyzes requests and dispatches tasks to sub-agents.",
+      "Sub-agents: Coder, Reviewer, Architect, Tester, Documenter, DevOps, Researcher.",
+      "Dispatch modes: one-to-one, chain, full-graph.",
+      "The Manager decides the workflow; user can confirm or reject plans at Lv1.",
+    ].join(" "),
+    parameters: ResonancoParams,
+
+    promptSnippet: "Orchestrate multi-agent collaboration through Manager",
+    promptGuidelines: [
+      "Use resonanco for ANY user request — code reviews, bug analysis, architecture discussions, and file inspections all benefit from multi-agent collaboration",
+      "The manager agent decides which sub-agent to use based on the task context",
+      "Even simple tasks like reviewing existing code should go through resonanco for structured analysis",
+    ],
+
+    async execute(
+      _toolCallId: string,
+      params: { prompt: string; permissionLevel?: 1 | 2 | 3 | 4 },
+      signal: AbortSignal | undefined,
+      onUpdate: ((partial: any) => void) | undefined,
+      ctx: any,
+    ) {
+      if (params.permissionLevel) {
+        engine.permission.setGlobalLevel(params.permissionLevel);
+      }
+
+      const wrappedOnUpdate = onUpdate
+        ? (partial: any) => { onUpdate(partial); updateWidget(ctx); }
+        : undefined;
+
+      const onAgentOutput = (agent: string, output: string) => {
+        const preview = output.replace(/\n/g, " ").slice(0, 200);
+        pi.sendMessage({
+          customType: "resonanco",
+          content: `[${agent}] ${preview}`,
+          display: true,
+        });
+      };
+
+      updateWidget(ctx);
+
+      try {
+        return await engine.run(params.prompt, ctx, signal, wrappedOnUpdate, onAgentOutput);
+      } finally {
+        updateWidget(ctx);
+      }
+    },
+
+    renderCall(args: any, theme: any, _context: any) {
+      const { renderResonancoCall } = require("./ui/renderer.ts");
+      return renderResonancoCall(args, theme, _context);
+    },
+
+    renderResult(result: any, options: { expanded: boolean }, theme: any, _context: any) {
+      const { renderResonancoResult } = require("./ui/renderer.ts");
+      return renderResonancoResult(result, options, theme, _context);
+    },
+  });
+
+  // ── Utility Tools ─────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "resonanco_list_agents",
+    label: "Resonanco: List Agents",
+    description: "List all available agents",
+    parameters: Type.Object({}),
+    async execute(_id: string, _p: any, _s: any, _u: any, ctx: any) {
+      const d = discoverAgents(ctx.cwd, "both");
+      const fmt = (list: typeof d.agents, label: string) =>
+        list.length > 0
+          ? list.map((a) => `- **${a.name}**: ${a.description}`).join("\n")
+          : `*(no ${label})*`;
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `## Resonanco Agents`,
+            `### Main Agent`,
+            fmt(d.agents.filter((a) => a.name === "manager"), "Manager"),
+            `### Sub-agents (${d.agents.filter((a) => a.name !== "manager").length})`,
+            fmt(d.agents.filter((a) => a.name !== "manager"), "sub-agents"),
+          ].join("\n"),
+        }],
+        details: d,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "resonanco_status",
+    label: "Resonanco: Status",
+    description: "View current engine status",
+    parameters: Type.Object({}),
+    async execute(_id: string, _p: any, _s: any, _u: any, _ctx: any) {
+      const s = engine.getStatus();
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `## Resonanco Status`,
+            `Phase: ${s.phase}  |  Steps: ${s.stepCount}`,
+            `Current Agent: ${s.currentAgent ?? "(idle)"}`,
+            `Dispatch Mode: ${s.dispatchMode ? DISPATCH_MODE_LABELS[s.dispatchMode] : "N/A"}`,
+            `Permission: ${PERMISSION_LABELS[s.permissionLevel]}`,
+            `Context Pool: ${s.contextStats.total} entries`,
+            ...Object.entries(s.contextStats.byRole).map(([r, c]) => `  - ${r}: ${c}`),
+            ``,
+            `History:`,
+            ...(s.agentHistory.length > 0
+              ? s.agentHistory.map((h, i) => `  ${i + 1}. ${h.agent}: ${h.task.slice(0, 60)} => ${h.status}`)
+              : ["  (none)"]),
+          ].join("\n"),
+        }],
+        details: s,
+      };
+    },
+  });
+
+  // ── Commands ──────────────────────────────────────────────────
+
+  pi.registerCommand("resonanco:status", {
+    description: "View Resonanco engine status",
+    handler: async (_args: string, ctx: any) => {
+      const s = engine.getStatus();
+      ctx.ui.notify(
+        `steps:${s.stepCount} phase:${s.phase} perm:Lv${s.permissionLevel} ctx:${s.contextStats.total}`,
+        "info",
+      );
+    },
+  });
+
+  pi.registerCommand("resonanco:agents", {
+    description: "List all agents",
+    handler: async (_args: string, ctx: any) => {
+      const d = discoverAgents(ctx.cwd, "both");
+      const list = d.agents
+        .map((a) => `${a.name === "manager" ? ">" : " "} ${a.name}: ${a.description.slice(0, 50)}`)
+        .join("\n");
+      ctx.ui.notify(`Resonanco (${d.agents.length}):\n${list}`, "info");
+    },
+  });
+
+  pi.registerCommand("resonanco:permission", {
+    description: "Set permission: /resonanco:permission <1-4> [agent]",
+    handler: async (_args: string, ctx: any) => {
+      const parts = _args.trim().split(/\s+/);
+      const level = parseInt(parts[0], 10) as 1 | 2 | 3 | 4;
+      if (level >= 1 && level <= 4) {
+        if (parts.length >= 2) {
+          engine.permission.setAgentLevel(parts[1] as any, level);
+          ctx.ui.notify(`${parts[1]} permission set to Lv${level}`, "info");
+        } else {
+          engine.permission.setGlobalLevel(level);
+          ctx.ui.notify(`Global permission set to Lv${level}: ${PERMISSION_LABELS[level]}`, "info");
+        }
+        updateWidget(ctx);
+      } else {
+        ctx.ui.notify("Usage: /resonanco:permission <1-4> [agent]", "error");
+      }
+    },
+  });
+
+  pi.registerCommand("resonanco:widget", {
+    description: "Toggle widget display: /resonanco:widget [off]",
+    handler: async (_args: string, ctx: any) => {
+      if (_args.trim() === "off") {
+        ctx.ui.setWidget(WIDGET_ID, undefined);
+        ctx.ui.notify("Resonanco widget hidden", "info");
+      } else {
+        updateWidget(ctx);
+        ctx.ui.notify("Resonanco widget shown", "info");
+      }
+    },
+  });
+
+  pi.registerCommand("resonanco:approve", {
+    description: "Approve the Manager's plan",
+    handler: async (_args: string, ctx: any) => {
+      ctx.ui.notify("Plan approved", "info");
+      pi.sendUserMessage(
+        _args.trim()
+          ? `User approved with note: ${_args.trim()}`
+          : "User approved the plan. Proceed."
+      );
+    },
+  });
+
+  pi.registerCommand("resonanco:reject", {
+    description: "Reject the Manager's plan with feedback",
+    handler: async (_args: string, ctx: any) => {
+      const feedback = _args.trim() || "Please redesign the approach";
+      ctx.ui.notify(`Rejected: ${feedback}`, "info");
+      pi.sendUserMessage(`User rejected the plan. Feedback: ${feedback}`);
+    },
+  });
+
+  // ── Workflow Shortcuts ────────────────────────────────────────
+
+  const WORKFLOWS: Record<string, { label: string; prompt: (args: string) => string }> = {
+    debate: {
+      label: "Debate",
+      prompt: (a) => `[Debate Mode] Organize coder/reviewer/architect/researcher to debate the following, presenting pros/cons and a final recommendation:\n\n${a}`,
+    },
+    explore: {
+      label: "Explore",
+      prompt: (a) => `[Explore Mode] Delegate to researcher + architect to deeply investigate the following topic and produce a comprehensive report:\n\n${a}`,
+    },
+    implement: {
+      label: "Implement",
+      prompt: (a) => `[Implement Mode] Use coder -> reviewer -> tester chain to complete the following task:\n\n${a}`,
+    },
+    review: {
+      label: "Review",
+      prompt: (a) => `[Review Mode] Delegate to reviewer + architect to jointly review the following and provide improvement suggestions:\n\n${a}`,
+    },
+    supervise: {
+      label: "Supervise",
+      prompt: (a) => `[Supervise Mode] Lv1 permission, Manager oversees every step. Each step requires user confirmation before execution:\n\n${a}`,
+    },
+  };
+
+  for (const [name, wf] of Object.entries(WORKFLOWS)) {
+    pi.registerCommand(`resonanco:${name}`, {
+      description: `${wf.label} mode: /resonanco:${name} <task description>`,
+      handler: async (_args: string, ctx: any) => {
+        if (!_args.trim()) {
+          ctx.ui.notify(`Usage: /resonanco:${name} <task description>`, "error");
+          return;
+        }
+        if (name === "supervise") {
+          engine.permission.setGlobalLevel(1);
+          updateWidget(ctx);
+        }
+        pi.sendUserMessage(wf.prompt(_args.trim()));
+        ctx.ui.notify(`${wf.label} mode triggered`, "info");
+      },
+    });
+  }
+
+  pi.registerCommand("resonanco:auto", {
+    description: "Toggle auto Manager mode: /resonanco:auto [on|off]",
+    handler: async (_args: string, ctx: any) => {
+      const arg = _args.trim().toLowerCase();
+      if (arg === "on") {
+        if (!autoManager) toggleAutoManager(ctx);
+      } else if (arg === "off") {
+        if (autoManager) toggleAutoManager(ctx);
+      } else {
+        toggleAutoManager(ctx);
+      }
+      updateWidget(ctx);
+    },
+  });
+
+  pi.registerCommand("resonanco:mode", {
+    description: "Set work mode: /resonanco:mode [plan|build]",
+    handler: async (_args: string, ctx: any) => {
+      const arg = _args.trim().toLowerCase();
+      if (arg === "plan" || arg === "build") {
+        setWorkMode(arg, ctx);
+        pi.sendMessage({
+          customType: "resonanco",
+          content: arg === "plan"
+            ? "Plan mode: read-only. You can read files and write design documents, but cannot modify code or run commands."
+            : "Build mode: full access. All tools available, subject to permission level.",
+          display: true,
+        });
+      } else {
+        ctx.ui.notify(`Current mode: ${workMode === "plan" ? "Plan (read-only, design docs)" : "Build (full access)"}`, "info");
+      }
+    },
+  });
+
+  // ── Lifecycle Events ──────────────────────────────────────────
+
+  let _timerCtx: any = null;
+  let _timerId: ReturnType<typeof setInterval> | null = null;
+
+  function startWidgetTimer(ctx: any) {
+    _timerCtx = ctx;
+    if (_timerId === null && ctx.ui && ctx.mode === "tui") {
+      _timerId = setInterval(() => {
+        _frame = (_frame + 1) % BRAILLE.length;
+        updateWidget(_timerCtx);
+      }, 80);
+    }
+  }
+
+  function stopWidgetTimer() {
+    if (_timerId !== null) {
+      clearInterval(_timerId);
+      _timerId = null;
+    }
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
+    startWidgetTimer(ctx);
+    updateWidget(ctx);
+  });
+
+  pi.on("session_shutdown", async () => {
+    stopWidgetTimer();
+  });
+
+  // Block restricted tools in plan mode
+  pi.on("tool_call", async (event, ctx) => {
+    if (workMode !== "plan") return;
+    if (!PLAN_TOOLS.has(event.toolName)) {
+      return {
+        block: true,
+        reason: `Plan mode: tool '${event.toolName}' is not available. Only read, grep, find, ls, write are allowed in plan mode.`,
+      };
+    }
+  });
+
+  pi.on("before_agent_start", async (event, ctx) => {
+    const modeNote = workMode === "plan"
+      ? "\n**Mode: PLAN** — Read-only planning mode. You can ONLY read files and write design documents. Do NOT attempt to call bash, edit, or any other tool — they will be blocked. If you need code changes, switch to BUILD mode with `/resonanco:mode build` or ctrl+q."
+      : "\n**Mode: BUILD** — Full access mode. All tools available. Respect the current permission level.\n";
+
+    let extra = modeNote;
+
+    if (autoManager) {
+      extra += [
+        "\n\n**Resonanco Auto Manager mode is active. You are the Manager, coordinating a team of sub-agents.**",
+        "",
+        "For every user request, you MUST first call the `resonanco` tool",
+        "to delegate the task to the appropriate sub-agent.",
+        "",
+        "Available sub-agents:",
+        "- coder: write/modify code",
+        "- reviewer: code review",
+        "- architect: architecture design",
+        "- tester: testing",
+        "- documenter: documentation",
+        "- devops: infrastructure/deployment",
+        "- researcher: research and analysis",
+      ].join("\n");
+    }
+
+    return {
+      systemPrompt: (event.systemPrompt ?? "") + "\n\n" + extra,
+    };
+  });
+}
