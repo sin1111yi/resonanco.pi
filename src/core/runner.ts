@@ -40,6 +40,7 @@ export interface SingleResult {
   stopReason?: string;
   errorMessage?: string;
   step?: number;
+  reasoning?: string;  // accumulated reasoning/thinking from all assistant messages
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
@@ -228,6 +229,22 @@ export async function runSingleAgent(
             if (!currentResult.model && msg.model) currentResult.model = msg.model;
             if (msg.stopReason) currentResult.stopReason = msg.stopReason;
             if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
+
+            // Extract reasoning/thinking content
+            const rc = (msg as any).reasoning_content || (msg as any).reasoning;
+            if (rc && typeof rc === "string") {
+              currentResult.reasoning = currentResult.reasoning
+                ? currentResult.reasoning + "\n" + rc
+                : rc;
+            } else if (msg.content && Array.isArray(msg.content)) {
+              for (const part of msg.content) {
+                if ((part as any).type === "reasoning" && (part as any).text) {
+                  currentResult.reasoning = currentResult.reasoning
+                    ? currentResult.reasoning + "\n" + (part as any).text
+                    : (part as any).text;
+                }
+              }
+            }
           }
           emitUpdate();
         }

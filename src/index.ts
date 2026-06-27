@@ -29,8 +29,9 @@ export default function (pi: ExtensionAPI) {
     documenter: { icon: "\u25C8", color: 37 },
     devops: { icon: "\u25C8", color: 31 },
     researcher: { icon: "\u25C8", color: 94 },
+    delivery: { icon: "\u25C8", color: 96 },
   };
-  const BUILTIN_ORDER = ["coder","reviewer","architect","tester","documenter","devops","researcher"];
+  const BUILTIN_ORDER = ["coder","reviewer","architect","tester","documenter","devops","researcher","delivery"];
   const CUSTOM_COLORS = [91, 93, 96, 95, 100, 101, 102, 103, 104, 105, 106, 107];
 
   // Custom agents registry: persisted in agent config
@@ -74,7 +75,7 @@ export default function (pi: ExtensionAPI) {
 
   // Braille spinner (npm-style)
   const BRAILLE = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
-  const BRAILLE_IDLE = "⣶"; // top 6 dots
+  const BRAILLE_IDLE = "⣶"; // gray 6-dot braille for inactive agents
   const PERM_SHORT: Record<number, string> = {1:"Observer",2:"Cautious",3:"Semi-auto",4:"Full-auto"};
   const MODE_LABEL: Record<string, string> = {"one-to-one":"OneToOne","chain":"Chain","full-graph":"FullGraph"};
 
@@ -92,24 +93,26 @@ export default function (pi: ExtensionAPI) {
       return C(color, ch);
     }).join(" ");
 
-    const modeLabel = workMode === "plan" ? C(33, "PLAN") : C(36, "BUILD");
+    const modeLabel = workMode === "plan" ? C(33, "Plan") : C(36, "Build");
     const parts: string[] = [`${modeLabel} \u2022 ${dotLine}`];
-    if (status.stepCount > 0) {
-      parts.push(`\uf0ae ${status.stepCount}`);
-      if (status.dispatchMode) {
-        parts.push(MODE_LABEL[status.dispatchMode]);
-      }
-    }
+
+    // Step count + dispatch mode
+    parts.push(`Step:${status.stepCount}`);
+    parts.push(status.dispatchMode ? MODE_LABEL[status.dispatchMode] : "-");
+
+    // Current agent(s): single name, or parallel count
     if (status.currentAgent) {
       const icon = getAgentIcon(status.currentAgent);
       const color = getAgentColor(status.currentAgent);
       parts.push(`${C(color, icon)} ${status.currentAgent}`);
-    } else {
-      parts.push(`\u{1F4A4} ${PERM_SHORT[status.permissionLevel]}`);
+    } else if (status.activeAgents.length > 0) {
+      parts.push(`◈ ${status.activeAgents.length} agents`);
     }
-    if (status.running && status.contextStats.total > 0) {
-      parts.push(`\uf249 ctx:${status.contextStats.total}`);
-    }
+    parts.push(PERM_SHORT[status.permissionLevel]);
+
+    // Always show context pool
+    parts.push(`Context:${status.contextStats.total}`);
+
     if (autoManager) parts.push("[auto]");
 
     const lines: string[] = [parts.join(" \u2022 ")];
@@ -192,18 +195,19 @@ export default function (pi: ExtensionAPI) {
     name: "resonanco",
     label: "Resonanco",
     description: [
-      "Multi-agent orchestration system. Manager analyzes requests and dispatches tasks to sub-agents.",
+      "Multi-agent delegation tool. The main agent (you) acts as Manager and specifies agent/task assignments directly in the prompt.",
+      "No internal Manager LLM — the prompt is parsed for MODE + STEPS, then sub-agents are dispatched.",
       "Sub-agents: Coder, Reviewer, Architect, Tester, Documenter, DevOps, Researcher.",
-      "Dispatch modes: one-to-one, chain, full-graph.",
-      "The Manager decides the workflow; user can confirm or reject plans at Lv1.",
+      "Dispatch modes: one-to-one (single agent), chain (sequential relay), full-graph (parallel).",
     ].join(" "),
     parameters: ResonancoParams,
 
-    promptSnippet: "Orchestrate multi-agent collaboration through Manager",
+    promptSnippet: "Delegate tasks to sub-agents",
     promptGuidelines: [
       "Use resonanco for ANY user request — code reviews, bug analysis, architecture discussions, and file inspections all benefit from multi-agent collaboration",
-      "The manager agent decides which sub-agent to use based on the task context",
-      "Even simple tasks like reviewing existing code should go through resonanco for structured analysis",
+      "You (the main agent) are the Manager. Specify MODE + STEPS in the prompt to delegate to sub-agents.",
+      "The prompt is parsed directly for delegation instructions — no internal Manager LLM.",
+      "Keep prompts focused: one task per call, with clear agent assignments.",
     ],
 
     async execute(
@@ -221,13 +225,31 @@ export default function (pi: ExtensionAPI) {
         ? (partial: any) => { onUpdate(partial); updateWidget(ctx); }
         : undefined;
 
-      const onAgentOutput = (agent: string, output: string) => {
-        const preview = output.replace(/\n/g, " ").slice(0, 200);
-        pi.sendMessage({
-          customType: "resonanco",
-          content: `[${agent}] ${preview}`,
-          display: true,
-        });
+      let _parallelBuf: { agent: string; output: string; reasoning?: string }[] = [];
+      let _parallelTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const onAgentOutput = (agent: string, output: string, reasoning?: string) => {
+        const status = engine.getStatus();
+        const isParallel = status.dispatchMode === "full-graph" && status.activeAgents.length > 1;
+
+        const fmt = (a: string, o: string, r?: string) => {
+          let t = `## ${a}`;
+          if (r) t += `\n\n> ${r.slice(0, 800)}`;
+          t += `\n\n${o}`;
+          return t;
+        };
+
+        if (isParallel) {
+          _parallelBuf.push({ agent, output, reasoning });
+          if (_parallelTimer) clearTimeout(_parallelTimer);
+          _parallelTimer = setTimeout(() => {
+            const combined = _parallelBuf.map((p) => fmt(p.agent, p.output, p.reasoning)).join("\n\n---\n\n");
+            pi.sendMessage({ customType: "resonanco", content: combined, display: true });
+            _parallelBuf = [];
+          }, 600);
+        } else {
+          pi.sendMessage({ customType: "resonanco", content: fmt(agent, output, reasoning), display: true });
+        }
       };
 
       updateWidget(ctx);
@@ -319,6 +341,101 @@ export default function (pi: ExtensionAPI) {
         `steps:${s.stepCount} phase:${s.phase} perm:Lv${s.permissionLevel} ctx:${s.contextStats.total}`,
         "info",
       );
+    },
+  });
+
+  pi.registerCommand("resonanco:consolidate", {
+    description: "Consolidate context pool: /resonanco:consolidate [--summarize] — merge entries from the same agent, optionally summarize via LLM",
+    handler: async (_args: string, ctx: any) => {
+      const doSummarize = _args.trim() === "--summarize";
+      const entries = ((engine.pool as any).state?.entries ?? []) as any[];
+
+      if (entries.length === 0) {
+        ctx.ui.notify("Context pool is empty", "info");
+        return;
+      }
+
+      // Group by agent
+      const groups = new Map<string, any[]>();
+      for (const entry of entries) {
+        const key = entry.agentName ?? "unknown";
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(entry);
+      }
+
+      let consolidated = 0;
+      const newEntries: any[] = [];
+
+      for (const [agent, group] of groups) {
+        if (group.length <= 1) {
+          newEntries.push(...group);
+          continue;
+        }
+
+        // Merge outputs
+        const combined = group
+          .map((e: any, i: number) => `[Entry ${i + 1}]\n${e.output}`)
+          .join("\n\n---\n\n");
+
+        if (doSummarize) {
+          // LLM summarization via pi subprocess
+          const summary = await new Promise<string>((resolve) => {
+            const { spawn } = require("node:child_process");
+            const prompt = `Summarize the following findings from \"${agent}\" into a concise single report. Keep all key technical details, drop redundancy.\n\n${combined.slice(0, 8000)}`;
+            const proc = spawn("pi", ["--mode", "json", "-p", prompt], {
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+            let out = "";
+            proc.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+            proc.on("close", () => {
+              // Extract final text from JSON-mode output
+              const lines = out.split("\n").filter(l => l.trim());
+              for (const line of lines.reverse()) {
+                try {
+                  const ev = JSON.parse(line);
+                  if (ev.type === "message_end" && ev.message) {
+                    for (const part of ev.message.content || []) {
+                      if (part.type === "text" && part.text) {
+                        resolve(part.text.trim());
+                        return;
+                      }
+                    }
+                  }
+                } catch {}
+              }
+              resolve(combined.slice(0, 2000) + "\n\n(summary failed, kept merged text)");
+            });
+          });
+
+          newEntries.push({
+            agentName: agent,
+            role: group[0].role,
+            phase: group[0].phase,
+            output: summary,
+            weight: Math.min(1.0, group.reduce((s: number, e: any) => s + e.weight, 0) * 0.5),
+            createdAt: Date.now(),
+            tags: [...(group[0].tags || []), "consolidated"],
+          });
+        } else {
+          // Simple merge: keep latest, prefix with older entries
+          const latest = { ...group[group.length - 1] };
+          latest.output = `${combined.slice(0, 3000)}\n\n(consolidated from ${group.length} entries)`;
+          latest.weight = Math.min(1.0, group.reduce((s: number, e: any) => s + e.weight, 0) * 0.5);
+          latest.tags = [...(latest.tags || []), "consolidated"];
+          newEntries.push(latest);
+        }
+
+        consolidated += group.length - 1;
+      }
+
+      (engine.pool as any).state.entries = newEntries;
+      const stats = engine.pool.getStats();
+      ctx.ui.notify(
+        `Consolidated: removed ${consolidated} entries, ${stats.total} remaining` +
+        (doSummarize ? " (LLM summarized)" : " (use --summarize for LLM summary)"),
+        "info",
+      );
+      updateWidget(ctx);
     },
   });
 
@@ -580,10 +697,16 @@ export default function (pi: ExtensionAPI) {
 
     if (autoManager) {
       extra += [
-        "\n\n**Resonanco Auto Manager mode is active. You are the Manager, coordinating a team of sub-agents.**",
+        "\n\n**Resonanco Auto Manager mode is active. You are the Manager.**",
         "",
-        "For every user request, you MUST first call the `resonanco` tool",
-        "to delegate the task to the appropriate sub-agent.",
+        "The `resonanco` tool directly parses MODE + STEPS from your prompt and dispatches sub-agents.",
+        "There is no internal Manager LLM — you decide the delegation plan.",
+        "",
+        "For every user request, call `resonanco` with structured instructions:",
+        "  MODE: one-to-one | chain | full-graph",
+        "  STEPS:",
+        "    1. <agent>: <task>",
+        "    2. <agent>: <task>",
         "",
         "Available sub-agents:",
         "- coder: write/modify code",

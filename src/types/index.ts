@@ -1,5 +1,5 @@
 /**
- * Resonanco v2 — Core type definitions (Observer Pattern / Relay Design)
+ * Resonanco v2 — Core type definitions
  */
 
 // ─── Agent Roles ────────────────────────────────────────────────────
@@ -16,7 +16,8 @@ export type AgentRole =
   | "tester"      // [sub] Tester — testing
   | "documenter"   // [sub] Documenter — documentation
   | "devops"      // [sub] DevOps — infrastructure
-  | "researcher";  // [sub] Researcher — investigation
+  | "researcher"  // [sub] Researcher — investigation
+  | "delivery";   // [sub] Delivery — summaries, reports, commit logs
 
 /** Main agent role */
 export const MAIN_AGENT_ROLE: AgentRole = "manager";
@@ -30,6 +31,7 @@ export const SUB_AGENT_ROLES: AgentRole[] = [
   "documenter",
   "devops",
   "researcher",
+  "delivery",
 ];
 
 /** Check if a role is a sub-agent */
@@ -53,6 +55,7 @@ export const ROLE_DISPLAY_NAMES: Record<AgentRole, string> = {
   documenter: "Documenter",
   devops: "DevOps",
   researcher: "Researcher",
+  delivery: "Delivery",
 };
 
 export const ROLE_DISPLAY_WITH_TAG: Record<AgentRole, string> = {
@@ -64,6 +67,7 @@ export const ROLE_DISPLAY_WITH_TAG: Record<AgentRole, string> = {
   documenter: "[sub] Documenter",
   devops: "[sub] DevOps",
   researcher: "[sub] Researcher",
+  delivery: "[sub] Delivery",
 };
 
 export const ROLE_EMOJIS: Record<AgentRole, string> = {
@@ -75,6 +79,7 @@ export const ROLE_EMOJIS: Record<AgentRole, string> = {
   documenter: "",
   devops: "",
   researcher: "",
+  delivery: "",
 };
 
 // ─── Work Phases ────────────────────────────────────────────────────
@@ -170,63 +175,6 @@ export interface ContextPoolState {
   globalWeight: number; // global decay factor
 }
 
-// ─── Relay Decision ─────────────────────────────────────────────────
-
-export interface RelayFactors {
-  /** Agent role fit score (0-1) */
-  roleFit: Record<AgentRole, number>;
-  /** Historical output relevance (0-1) */
-  historyRelevance: Record<AgentRole, number>;
-  /** user speech influence (0-1) */
-  userInfluence: Record<AgentRole, number>;
-  /** Phase progress recommendation (0-1) */
-  phaseFit: Record<AgentRole, number>;
-}
-
-export interface RelayDecision {
-  nextAgent: AgentRole;
-  confidence: number;
-  reasoning: string;
-  alternatives: Array<{ agent: AgentRole; score: number }>;
-}
-
-// ─── Session State ──────────────────────────────────────────────────
-
-export interface SessionState {
-  status: "idle" | "running" | "waiting_user" | "completed" | "aborted";
-
-  /** original user prompt */
-  userPrompt: string;
-
-  /** user mid-stream speech queue */
-  userInterrupts: Array<{
-    text: string;
-    timestamp: number;
-    processed: boolean;
-  }>;
-
-  /** Current work phase */
-  currentPhase: WorkPhase;
-
-  /** Currently active agent */
-  currentAgent: AgentRole | null;
-
-  /** Agent call history */
-  history: AgentCallRecord[];
-
-  /** Permission level */
-  permissionLevel: PermissionLevel;
-
-  /** Context pool stats */
-  contextPool: ContextPoolState;
-
-  /** Current handoff decision */
-  lastDecision: RelayDecision | null;
-
-  /** Final deliverable */
-  finalDelivery: string | null;
-}
-
 export interface AgentCallRecord {
   agent: AgentRole;
   task: string;
@@ -238,13 +186,6 @@ export interface AgentCallRecord {
 }
 
 // ─── Task / Execution ───────────────────────────────────────────────
-
-export interface AgentTask {
-  agent: AgentRole;
-  task: string;
-  contextSummary: string; // weighted context summary
-  permissionLevel: PermissionLevel;
-}
 
 export interface UsageStats {
   input: number;
@@ -262,9 +203,9 @@ export interface UsageStats {
 export type DispatchMode = "one-to-one" | "chain" | "full-graph";
 
 export const DISPATCH_MODE_LABELS: Record<DispatchMode, string> = {
-  "one-to-one": "one-to-one",
-  "chain": "chain",
-  "full-graph": "full-graph",
+  "one-to-one": "One-to-one",
+  "chain": "Chain",
+  "full-graph": "Full-graph",
 };
 
 export const DISPATCH_MODE_DESCRIPTIONS: Record<DispatchMode, string> = {
@@ -272,20 +213,6 @@ export const DISPATCH_MODE_DESCRIPTIONS: Record<DispatchMode, string> = {
   "chain": "Multiple sub-agents relay sequentially, previous output feeds next",
   "full-graph": "Fully connected graph, Manager dynamically decides each step",
 };
-
-/** A single step in the Manager decision */
-export interface DispatchStep {
-  agent: AgentRole;
-  task: string;
-}
-
-/** Manager dispatch instruction */
-export interface DispatchInstruction {
-  mode: DispatchMode;
-  steps: DispatchStep[];
-  reason: string;
-  context?: string;
-}
 
 // ─── Config ─────────────────────────────────────────────────────────
 
@@ -316,3 +243,29 @@ export const DEFAULT_CONFIG: ResonancoConfig = {
   maxParallelTasks: 4,
   maxConcurrency: 2,
 };
+
+// ─── Agent Registry Types ──────────────────────────────────────────
+
+export type AgentScope = "user" | "project";
+
+export type CostPriority = "cost" | "speed" | "quality" | "balanced";
+
+export interface AgentConfig {
+  name: string;
+  description: string;
+  tags?: string[];
+  tools?: string[];
+  model?: string;
+  costPriority?: CostPriority;
+  maxTurns?: number;
+  readonly?: boolean;
+  sandbox?: boolean;
+  systemPrompt: string;
+  source: "user" | "project";
+  filePath: string;
+}
+
+export interface AgentDiscoveryResult {
+  agents: AgentConfig[];
+  projectAgentsDir: string | null;
+}

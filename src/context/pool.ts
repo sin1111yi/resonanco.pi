@@ -162,6 +162,38 @@ export class ContextPool {
     return { total: this.state.entries.length, byRole };
   }
 
+  /**
+   * Consolidate: merge entries from the same agent into a single summary.
+   * Keeps the most recent full output per agent, appends a merge note.
+   * Returns the number of entries removed.
+   */
+  consolidate(): number {
+    const before = this.state.entries.length;
+    const seen = new Set<string>();
+    const merged: ContextEntry[] = [];
+
+    // Process in reverse (newest first) to keep latest output
+    for (let i = this.state.entries.length - 1; i >= 0; i--) {
+      const entry = this.state.entries[i];
+      if (seen.has(entry.agentName)) {
+        // Find the kept entry and append a reference
+        const kept = merged.find((m) => m.agentName === entry.agentName);
+        if (kept) {
+          kept.output = `[+${entry.createdAt.toFixed(0)} merged] ${entry.output.slice(0, 200)}\n---\n${kept.output}`;
+          kept.weight = Math.min(this.weightCap, kept.weight + entry.weight * 0.3);
+        }
+        continue;
+      }
+      seen.add(entry.agentName);
+      merged.push({ ...entry });
+    }
+
+    // Restore chronological order
+    merged.reverse();
+    this.state.entries = merged;
+    return before - this.state.entries.length;
+  }
+
   /** Reset */
   reset(): void {
     this.state = { entries: [], globalWeight: 1.0 };
